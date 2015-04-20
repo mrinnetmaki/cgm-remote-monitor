@@ -290,11 +290,7 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
 
     // get the desired opacity for context chart based on the brush extent
     function highlightBrushPoints(data) {
-        if (data.date.getTime() >= brush.extent()[0].getTime() && data.date.getTime() <= brush.extent()[1].getTime()) {
-            return futureOpacity(data.date.getTime() - latestSGV.x);
-        } else {
-            return 0.5;
-        }
+        return 0.5;
     }
 
     // clears the current user brush and resets to the current real time data
@@ -325,6 +321,8 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
     }
 
     function brushEnded() {
+        // when we're done brushing, re-run brushed() again with retroPredictions enabled
+        brushed(false, true);
         // update the opacity of the context data points to brush extent
         context.selectAll('circle')
             .data(data)
@@ -365,7 +363,8 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
     }
 
     // function to call when context chart is brushed
-    function brushed(skipTimer) {
+    // if we're brushing, don't display retroPredictions, as they're too slow
+    function brushed(skipTimer, retroPredict) {
 
         if (!skipTimer) {
             // set a timer to reset focus chart to real-time data
@@ -1370,12 +1369,14 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    // function to predict
+    // functions to predict
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    function predictAR(actual, lookback) {
+
+    function predictARDeltas(actual, lookback, tick) {
+        var predict_hr = 4;
         var ONE_MINUTE = 60 * 1000;
         var FIVE_MINUTES = 5 * ONE_MINUTE;
-        var predicted = [];
+        var predictedDeltas = [];
         var BG_REF = scaleBg(140);
         var BG_MIN = scaleBg(36);
         var BG_MAX = scaleBg(400);
@@ -1395,20 +1396,28 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
         // for testing
         //var CONE = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         if (actual.length < lookback+1) {
-            var y = [Math.log(actual[actual.length-1].sgv / BG_REF), Math.log(actual[actual.length-1].sgv / BG_REF)];
+            for (var i = 0; i < predict_hr/(tick*ONE_MINUTE); i++) {
+                predictedDeltas[i] = 0;
+            }
         } else {
             var elapsedMins = (actual[actual.length-1].date - actual[actual.length-1-lookback].date) / ONE_MINUTE;
-            // construct a '5m ago' sgv offset from current sgv by the average change over the lookback interval
-            var lookbackSgvChange = actual[lookback].sgv-actual[0].sgv;
-            var fiveMinAgoSgv = actual[lookback].sgv - lookbackSgvChange/elapsedMins*5;
-            y = [Math.log(fiveMinAgoSgv / BG_REF), Math.log(actual[lookback].sgv / BG_REF)];
-            /*
-            if (elapsedMins < lookback * 5.1) {
-                y = [Math.log(actual[0].sgv / BG_REF), Math.log(actual[lookback].sgv / BG_REF)];
-            } else {
-                y = [Math.log(actual[lookback].sgv / BG_REF), Math.log(actual[lookback].sgv / BG_REF)];
+            // construct a "5m ago" sgv offset from current sgv by the average change over the lookback interval
+            var lookbackSgvChange = actual[actual.length-1].sgv-actual[actual.length-1-lookback].sgv;
+            var fiveMinAgoSgv = actual[actual.length-1].sgv - lookbackSgvChange/elapsedMins*5;
+            var y = [Math.log(fiveMinAgoSgv / BG_REF), Math.log(actual[actual.length-1].sgv / BG_REF)];
+            var initial = actual[actual.length-1].sgv;
+            var AR = [-0.723, 1.716];
+            var dt = actual[actual.length-1-lookback].date.getTime();
+            for (var i = 0; i < predict_hr*60/tick; i++) {
+                if (i < ARpredict_hr*60/tick) {
+                    y = [y[1], AR[0] * y[0] + AR[1] * y[1]];
+                    dt = dt + tick*ONE_MINUTE;
+                    var sgv = Math.max(BG_MIN, Math.min(BG_MAX, Math.round(BG_REF * Math.exp((y[1])))));
+                    var delta = sgv - initial;
+                }
+                predictedDeltas[i] = delta;
+                if (i > 0 && delta == predictedDeltas[i-1]) { return predictedDeltas; }
             }
-            */
         }
         var AR = [-0.723, 1.716];
         var dt = actual[lookback].date.getTime();
@@ -1654,6 +1663,36 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
                     latestUpdateTime = Date.now();
                     latestSGV = d[0][d[0].length - 1];
                     prevSGV = d[0][d[0].length - 2];
+
+                    //TODO: alarmHigh/alarmLow probably shouldn't be here
+                    if (browserSettings.alarmHigh) {
+                        $('.container .current').toggleClass('high', latestSGV.y > 180);
+                    }
+                    if (browserSettings.alarmLow) {
+                        $('.container .current').toggleClass('low', latestSGV.y < 70);
+                    }
+                }
+
+                treatments = d[3];
+                treatments.forEach(function (d) {
+                    d.created_at = new Date(d.created_at);
+                });
+
+                profile = d[5][0];
+
+                cal = d[6][d[6].length-1];
+
+                var temp1 = [ ];
+                if (cal) {
+                    temp1 = d[0].map(function (obj) {
+                        var rawBg = rawIsigToRawBg(obj.unfiltered
+                            , cal.scale || [ ]
+                            , cal.intercept
+                            , cal.slope || [ ]
+                            , obj.filtered
+                            , obj.y);
+                        return { date: new Date(obj.x-2*1000), y: rawBg, sgv: scaleBg(rawBg), color: 'white', type: 'rawbg'}
+                    });
                 }
 
                 treatments = d[3];
@@ -1685,9 +1724,9 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
                 // TODO: This is a kludge to advance the time as data becomes stale by making old predictor clear (using color = 'none')
                 // This shouldn't have to be sent and can be fixed by using xScale.domain([x0,x1]) function with
                 // 2 days before now as x0 and 30 minutes from now for x1 for context plot, but this will be
-                // required to happen when 'now' event is sent from websocket.js every minute.  When fixed,
-                // remove all 'color != 'none'' code
-                data = data.concat(d[1].map(function (obj) { return { date: new Date(obj.x), y: obj.y, sgv: scaleBg(obj.y), color: 'none', type: 'server-forecast'} }));
+                // required to happen when "now" event is sent from websocket.js every minute.  When fixed,
+                // remove all "color != 'none'" code
+                data = data.concat(d[1].map(function (obj) { return { date: new Date(obj.x), y: obj.y, sgv: scaleBg(obj.y), color: 'none', type: 'server-forecast' } }));
 
                 //Add MBG's also, pretend they are SGV's
                 data = data.concat(d[2].map(function (obj) { return { date: new Date(obj.x), y: obj.y, sgv: scaleBg(obj.y), color: 'red', type: 'mbg', device: obj.device } }));
@@ -1800,3 +1839,4 @@ var app = {}, browserSettings = {}, browserStorage = $.localStorage;
     });
 
 })();
+
