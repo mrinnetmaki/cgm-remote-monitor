@@ -537,13 +537,8 @@ div.tooltip {
         height: auto !important;
     }
 
-    #toolbar > h1 {
+    #toolbar h1 {
         display: none;
-    }
-
-    #iob-cob h1 {
-        left: 60px;
-        right: auto;
     }
 
     .container {
