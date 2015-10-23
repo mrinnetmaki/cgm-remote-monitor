@@ -120,4 +120,3 @@ everyone get a better understanding of your design.
 * Create tests for your new code, and for the old code too.  We are aiming for a full test coverage.
 * If your going to be working in old code that needs lots of reformatting consider doing the clean as a separate PR.
 * If you can find others to help test your PR is will help get them merged in sooner.
- 
